@@ -14,8 +14,12 @@ class Loader:
                  load_feats=['xyz', 'feats'],
                  load_dims=[3, 2],
                  load_fraction=1.0,
+                 use_dims=None,
                  obj_min_pts=None,
-                 to_ego_frame=True):
+                 max_pts=None,
+                 to_ego_frame=True,
+                 relative_timestamp=True,
+                 timestamp_dim=-1):
 
         if isinstance(metadata, str):
             with open(metadata, 'rb') as f:
@@ -35,8 +39,12 @@ class Loader:
         self.load_feats = load_feats
         self.load_dims = load_dims
         self.load_fraction = load_fraction
+        self.use_dims = use_dims
         self.obj_min_pts = obj_min_pts
+        self.max_pts = max_pts
         self.to_ego_frame = to_ego_frame
+        self.relative_timestamp = relative_timestamp
+        self.timestamp_dim = timestamp_dim
 
     def get_frame_info(self, frame_id):
         if self.map_frame_id and frame_id in self.frame_id_map:
@@ -107,11 +115,26 @@ class Loader:
         else:
             points = np.zeros((0, sum(self.load_dims)), dtype=np.float32)
 
+        if self.max_pts and points.shape[0] > self.max_pts:
+            indices = np.random.choice(points.shape[0], self.max_pts, replace=False)
+            points = points[indices]
+
+        if isinstance(self.use_dims, int):
+            points = points[:,:self.use_dims]
+        elif isinstance(self.use_dims, (list, tuple)):
+            points = points[:,self.use_dims]
+
         if self.to_ego_frame:
             ego_pose = frame_info.get('ego_pose', np.eye(4))
             points[:,:3] = apply_transform(np.linalg.inv(ego_pose), points[:,:3])
 
+        if self.relative_timestamp and self.timestamp_dim < points.shape[1]:
+            points[:,self.timestamp_dim] -= frame_info.get('timestamp', 0)
+
         return points
 
     def __getitem__(self, frame_id):
+        return self.load(frame_id)
+
+    def __call__(self, frame_id):
         return self.load(frame_id)

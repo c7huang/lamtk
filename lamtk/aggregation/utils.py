@@ -1,8 +1,6 @@
 import glob
 import torch
-import pytorch3d
 
-import pytorch3d.transforms as tf3d
 import numpy as np
 import torch.nn.functional as F
 
@@ -163,6 +161,7 @@ def get_corners_torch(box,rot):
     :return: <np.float: 3, 8>. First four corners are the ones facing forward.
         The last four are the ones facing backwards.
     """
+    import pytorch3d
     w, l, h = box[:,3:4], box[:,4:5], box[:,5:6]
 
     # 3D bounding box corners. (Convention: x points forward, y to the left, z up.)
@@ -186,6 +185,7 @@ def get_image_crops_batch(img,
                           crop_size=(224,224),
                           imsize=(1600,900),
                           visibility=BoxVisibility.ANY):
+    import pytorch3d
     num_boxes = boxes_3d.size(0)
     axis_angle = torch.cat([torch.zeros(num_boxes,2).to(device),-boxes_3d[:,6:7] - torch.pi/2],dim=1)
     yaw_quat = pytorch3d.transforms.axis_angle_to_quaternion(axis_angle)

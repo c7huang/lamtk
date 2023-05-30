@@ -116,6 +116,11 @@ class NuScenesAggregator(DatasetAggregator):
             frames.append(frame)
             lidar_token = sd['LIDAR_TOP']['next']
 
+        for i, frame in enumerate(frames):
+            frame['timestamp'] = frame['sd']['LIDAR_TOP']['timestamp'] / 1e6
+            if i > 0:
+                frame['timestamp'] -= frames[0]['timestamp']
+        frames[0]['timestamp'] = 0
         return frames
 
     def load_frame_info(self, frame: dict) -> None:
@@ -125,7 +130,10 @@ class NuScenesAggregator(DatasetAggregator):
         sensor2ego = self.nusc.get(
             'calibrated_sensor', sd['calibrated_sensor_token'])
         ego2global = self.nusc.get('ego_pose', sd['ego_pose_token'])
-        frame['frame_id'] = sd['token']
+        if sd['is_key_frame']:
+            frame['frame_id'] = sd['sample_token']
+        else:
+            frame['frame_id'] = sd['token']
         frame['ego_pose'] = affine_transform(
             rotation=np.roll(ego2global['rotation'], -1),
             rotation_format='quat',
@@ -135,7 +143,6 @@ class NuScenesAggregator(DatasetAggregator):
             rotation_format='quat',
             translation=sensor2ego['translation']
         )
-        frame['timestamp'] = sd['timestamp'] / 1e6
 
     def load_images(self, frame: dict) -> None:
         frame['images'] = {}
@@ -228,14 +235,14 @@ class NuScenesAggregator(DatasetAggregator):
         points = np.fromfile(
             f'{self.nusc.dataroot}/{sd["filename"]}', dtype=np.float32
         ).reshape(-1, 5)
-        # points = points[np.linalg.norm(points[:,:3], axis=1) > 2]
+        points = points[np.linalg.norm(points[:,:3], axis=1) > 2]
         frame['pts_xyz'] = points[:, :3]
         frame['pts_range'] = np.linalg.norm(
             frame['pts_xyz'], axis=-1, keepdims=True)
         frame['pts_dir'] = frame['pts_xyz'] / frame['pts_range']
         # Add frame idx and timestamp as additional feature channel
         frame['pts_feats'] = np.concatenate([
-            points[:, 3:5], np.tile(frame['idx'], (points.shape[0], 1)),
+            points[:, 3:5], np.tile(frame['timestamp'], (points.shape[0], 1)),
         ], axis=-1).astype(np.float32)
         frame['lidar_extrinsic'] = frame['ego_pose']
 
@@ -449,7 +456,6 @@ class Center2DRange(object):
         repr_str += f'(coordinate={self.coordinate}'
         return repr_str
 
-from mmdet3d.core.bbox.iou_calculators import BboxOverlapsNearest3D
 from scipy.optimize import linear_sum_assignment
 import torch
 
@@ -494,6 +500,7 @@ class NuScenesAggregatorFromDetector(NuScenesAggregator):
                  skip_non_keyframe=True,
                  *args, 
                  **kwargs):
+        from mmdet3d.core.bbox.iou_calculators import BboxOverlapsNearest3D
         super().__init__(*args, **kwargs)
         self.merged_global_dets_ = torch.load(merged_global_dets_path)
         self.merged_local_dets_ = torch.load(merged_local_dets_path)

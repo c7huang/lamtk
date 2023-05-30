@@ -1,7 +1,9 @@
+import os
 import io
 import glob
 import numpy as np
 import PIL
+from pathlib import Path
 try:
     import tensorflow.compat.v1 as tf
     from waymo_open_dataset.utils import frame_utils
@@ -18,10 +20,11 @@ class WaymoAggregator(DatasetAggregator):
     LASERS = ['UNKNOWN', 'TOP', 'FRONT', 'SIDE_LEFT', 'SIDE_RIGHT', 'REAR']
     CLASSES = ['UNKNOWN', 'Vehicle', 'Pedestrian', 'Sign', 'Cyclist']
 
-    def __init__(self, dataset_path, split='training', *args, **kwargs):
+    def __init__(self, dataset_path, split='training', remove_ground=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dataset_path = dataset_path
         self.split = split
+        self.remove_ground = remove_ground
         tfrecords = list(
             sorted(glob.glob(f'{dataset_path}/{split}/*.tfrecord')))
         self.scene_ids = [
@@ -33,19 +36,98 @@ class WaymoAggregator(DatasetAggregator):
         for i, data in enumerate(tf.data.TFRecordDataset(tfrecord, compression_type='')):
             frame = dataset_pb2.Frame()
             frame.ParseFromString(bytearray(data.numpy()))
-            frames.append(dict(idx=i, frame=frame, frame_id=f'{scene_id}_{i:0>3}'))
+            frames.append(dict(idx=i, frame=frame, frame_id=f'{Path(tfrecord).stem}_{i:0>3}'))
+        for i, frame in enumerate(frames):
+            frame['timestamp'] = frame['frame'].timestamp_micros / 1e6
+            if i > 0:
+                frame['timestamp'] -= frames[0]['timestamp']
+        frames[0]['timestamp'] = 0
         return frames
 
     def load_frame_info(self, frame):
         frame['ego_pose'] = np.asarray(
             frame['frame'].pose.transform).reshape((4, 4))
-        frame['timestamp'] = frame['frame'].timestamp_micros / 1e6
+        # frame['timestamp'] = frame['frame'].timestamp_micros / 1e6
 
     def load_images(self, frame):
         frame['images'] = {self.CAMERAS[i.name]: np.asarray(
             PIL.Image.open(io.BytesIO(i.image))) for i in frame['frame'].images}
 
     def load_points(self, frame):
+        if os.path.exists(f'{self.dataset_path}/pcdet_format'):
+            self.load_points_pcdet(frame)
+        else:
+            self.load_points_official(frame)
+        if self.remove_ground:
+            self.patchwork_ground_removal(frame)
+
+    def patchwork_ground_removal(self, frame):
+        try:
+            import sys
+            patchwork_module_path = os.path.join("../patchwork-plusplus/build/python_wrapper")
+            sys.path.insert(0, patchwork_module_path)
+            import pypatchworkpp
+        except ImportError:
+            print("Cannot find pypatchworkpp!")
+            exit(1)
+
+        params = pypatchworkpp.Parameters()
+        params.enable_RNR = False
+        params.sensor_height = 0
+        params.min_range = 0
+        params.max_range = 15
+        params.num_rings_each_zone = [8, 4, 4, 4]
+        pw = pypatchworkpp.patchworkpp(params)
+        params2 = pypatchworkpp.Parameters()
+        params2.enable_RNR = False
+        params2.sensor_height = 0
+        params2.min_range = 0
+        params2.max_range = 75
+        pw2 = pypatchworkpp.patchworkpp(params2)
+
+        pw.estimateGround(frame['pts_xyz'])
+        pts_gnd = pw.getGround()
+        pts_gnd_mask = np.isin(frame['pts_xyz'], pts_gnd).all(1)
+        pw2.estimateGround(frame['pts_xyz'])
+        pts_gnd = pw2.getGround()
+        pts_gnd_mask |= np.isin(frame['pts_xyz'], pts_gnd).all(1)
+
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(6.4, 6.4), dpi=150)
+        # plt.scatter(frame['pts_xyz'][:,0], frame['pts_xyz'][:,1], c=frame['pts_xyz'][:,2], s=0.01, cmap='Blues', vmin=-2, vmax=2)
+        # plt.axis('off')
+        # plt.xlim(-50, 50)
+        # plt.ylim(-50, 50)
+        # plt.show()
+        # pts_gnd = frame['pts_xyz'][pts_gnd_mask]
+
+        frame['pts_xyz'] = frame['pts_xyz'][~pts_gnd_mask]
+        frame['pts_feats'] = frame['pts_feats'][~pts_gnd_mask]
+
+        # plt.figure(figsize=(6.4, 6.4), dpi=150)
+        # plt.scatter(frame['pts_xyz'][:,0], frame['pts_xyz'][:,1], c=frame['pts_xyz'][:,2], s=0.01, cmap='Blues', vmin=-2, vmax=2)
+        # plt.axis('off')
+        # plt.xlim(-50, 50)
+        # plt.ylim(-50, 50)
+        # plt.show()
+
+        # plt.figure(figsize=(6.4, 6.4), dpi=150)
+        # plt.scatter(pts_gnd[:,0], pts_gnd[:,1], c=pts_gnd[:,2], s=0.01, cmap='Blues', vmin=-2, vmax=2)
+        # plt.axis('off')
+        # plt.xlim(-50, 50)
+        # plt.ylim(-50, 50)
+        # plt.show()
+        # raise
+
+    def load_points_pcdet(self, frame):
+        lidar_path = f'{self.dataset_path}/pcdet_format/waymo_processed_data_v0_5_0/{frame["frame_id"][:-4]}/{frame["idx"]:0>4}.npy'
+        points = np.load(lidar_path)
+        frame['pts_xyz'] = points[:,:3]
+        frame['pts_feats'] = np.concatenate([
+            points[:,3:5], np.tile(frame['timestamp'], (points.shape[0], 1)),
+        ], axis=-1).astype(np.float32)
+
+    def load_points_official(self, frame):
         f = frame['frame']
         calibs = sorted(f.context.laser_calibrations, key=lambda c: c.name)
         frame['lidar_extrinsics'] = {self.LASERS[c.name]:
@@ -80,7 +162,7 @@ class WaymoAggregator(DatasetAggregator):
         points = np.concatenate([*points_0, *points_1])
         frame['pts_xyz'] = points[:, [3, 4, 5]]
         frame['pts_feats'] = np.concatenate([
-            points[:, [1, 2, 6]], np.tile(frame['idx'], (points.shape[0], 1)),
+            points[:, [1, 2]], np.tile(frame['timestamp'], (points.shape[0], 1)),
         ], axis=-1).astype(np.float32)
         frame['cp_points'] = np.concatenate([*cp_points_0, *cp_points_1])
         frame['pts_dir'] = np.concatenate([*pts_dir_0, *pts_dir_1])
