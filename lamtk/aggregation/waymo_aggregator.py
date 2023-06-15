@@ -28,11 +28,15 @@ class WaymoAggregator(DatasetAggregator):
         tfrecords = list(
             sorted(glob.glob(f'{dataset_path}/{split}/*.tfrecord')))
         self.scene_ids = [
-            x.split('-')[1][:-len('_with_camera_labels.tfrecord')] for x in tfrecords]
+            x.split('-')[1][:-len('_with_camera_labels.tfrecord')] 
+            if x.endswith('_with_camera_labels.tfrecord') 
+            else x.split('-')[1][:-len('.tfrecord')] for x in tfrecords]
 
     def gather_frames(self, scene_id):
         frames = []
         tfrecord = f'{self.dataset_path}/{self.split}/segment-{scene_id}_with_camera_labels.tfrecord'
+        if not os.path.exists(tfrecord):
+            tfrecord = f'{self.dataset_path}/{self.split}/segment-{scene_id}.tfrecord'
         for i, data in enumerate(tf.data.TFRecordDataset(tfrecord, compression_type='')):
             frame = dataset_pb2.Frame()
             frame.ParseFromString(bytearray(data.numpy()))
